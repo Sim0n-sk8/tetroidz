@@ -34,7 +34,7 @@ const PIECES = {
 
 const COLORS = {
   I: "#55ffff",
-  O: "#ffea00",
+  O: "#ffd900ff",
   T: "#ff55ff",
   L: "#ffaa55",
   J: "#5555ff",
