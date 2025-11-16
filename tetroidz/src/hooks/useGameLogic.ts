@@ -1,11 +1,11 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
-import { View, Text, StyleSheet, TouchableOpacity, Pressable, Platform } from "react-native";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { saveLifetimeStats, loadLifetimeStats } from "../lib/storage";
 
-const BOARD_WIDTH = 10;
-const BOARD_HEIGHT = 18;
+export const BOARD_WIDTH = 10;
+export const BOARD_HEIGHT = 20;
 
 // --- Piece Shapes ---
-const PIECES = {
+export const PIECES = {
   I: [[1, 1, 1, 1]],
   O: [
     [1, 1],
@@ -34,7 +34,7 @@ const PIECES = {
 };
 
 // --- Piece Colors (Fixed to standard 6-digit hex) ---
-const COLORS = {
+export const COLORS = {
   I: "#00FFFF", // Cyan
   O: "#FFFF00", // Yellow
   T: "#AA00FF", // Purple
@@ -44,15 +44,15 @@ const COLORS = {
   Z: "#FF0000", // Red
 };
 
-type PieceName = keyof typeof PIECES;
+export type PieceName = keyof typeof PIECES;
 
-interface Piece {
+export interface Piece {
   shape: number[][];
   color: string;
   name: PieceName;
 }
 
-interface Position {
+export interface Position {
   x: number;
   y: number;
   rotation: number; // 0, 1, 2, 3 (0 = spawn)
@@ -129,27 +129,41 @@ const rotateMatrix = (matrix: number[][], dir: 1 | -1) => {
   return newMatrix;
 };
 
-export default function Tetris() {
+const useGameLogic = () => {
+  const pieceBag = useRef<PieceName[]>([]);
+
+  const getNextPiece = (): Piece => {
+    if (pieceBag.current.length === 0) {
+      const pieces = Object.keys(PIECES) as PieceName[];
+      // Shuffle the pieces
+      for (let i = pieces.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [pieces[i], pieces[j]] = [pieces[j], pieces[i]];
+      }
+      pieceBag.current = pieces;
+    }
+    const name = pieceBag.current.pop()!;
+    return { shape: PIECES[name], color: COLORS[name], name };
+  };
+
   const [board, setBoard] = useState<(string | null)[][]>(createEmptyBoard());
-  const [currentPiece, setCurrentPiece] = useState<Piece>({...randomPiece()});
+  const [currentPiece, setCurrentPiece] = useState<Piece>(() => getNextPiece());
   const [pos, setPos] = useState<Position>({ x: 3, y: 0, rotation: 0 });
-  const [nextPiece, setNextPiece] = useState<Piece>(randomPiece());
+  const [nextPiece, setNextPiece] = useState<Piece>(() => getNextPiece());
   const [holdPiece, setHoldPiece] = useState<Piece | null>(null);
   const [holdUsed, setHoldUsed] = useState(false);
   const [gameOver, setGameOver] = useState(false);
   const [score, setScore] = useState(0);
+  const [linesCleared, setLinesCleared] = useState(0);
+  const [timeElapsed, setTimeElapsed] = useState(0);
+  const [dropSpeed, setDropSpeed] = useState(1000);
   const [flashLines, setFlashLines] = useState<number[]>([]);
   const softDropRef = useRef(false);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
 
   function createEmptyBoard(): (string | null)[][] {
     return Array.from({ length: BOARD_HEIGHT }, () => Array(BOARD_WIDTH).fill(null));
-  }
-
-  function randomPiece(): Piece {
-    const keys = Object.keys(PIECES) as PieceName[];
-    const name = keys[Math.floor(Math.random() * keys.length)];
-    return { shape: PIECES[name], color: COLORS[name], name };
   }
 
   const mergePiece = useCallback(
@@ -208,6 +222,13 @@ export default function Tetris() {
       if (clearedRows.length > 0) {
         setFlashLines(clearedRows);
         setScore((prev) => prev + clearedRows.length * 100);
+        setLinesCleared((prev) => {
+          const newLinesCleared = prev + clearedRows.length;
+          if (Math.floor(newLinesCleared / 10) > Math.floor(prev / 10)) {
+            setDropSpeed((prevSpeed) => Math.max(100, prevSpeed - 100));
+          }
+          return newLinesCleared;
+        });
 
         setTimeout(() => {
           // Re-create the empty rows at the top
@@ -234,7 +255,7 @@ export default function Tetris() {
 
       setCurrentPiece(nextPiece);
       setPos({ x: 3, y: 0, rotation: 0 });
-      setNextPiece(randomPiece());
+      setNextPiece(getNextPiece());
     } else {
       setPos((prev) => ({ ...prev, y: prev.y + 1 }));
     }
@@ -274,7 +295,7 @@ export default function Tetris() {
     if (!holdPiece) {
       setHoldPiece({ ...currentPiece, shape: PIECES[currentPiece.name] }); // Store the original shape
       setCurrentPiece(nextPiece);
-      setNextPiece(randomPiece());
+      setNextPiece(getNextPiece());
     } else {
       const temp = { ...currentPiece, shape: PIECES[currentPiece.name] }; 
       setCurrentPiece(holdPiece);
@@ -285,12 +306,16 @@ export default function Tetris() {
   };
 
   const restart = () => {
+    pieceBag.current = [];
     setBoard(createEmptyBoard());
-    setCurrentPiece(randomPiece());
-    setNextPiece(randomPiece());
+    setCurrentPiece(getNextPiece());
+    setNextPiece(getNextPiece());
     setHoldPiece(null);
     setPos({ x: 3, y: 0, rotation: 0 });
     setScore(0);
+    setLinesCleared(0);
+    setTimeElapsed(0);
+    setDropSpeed(1000);
     setGameOver(false);
     setHoldUsed(false);
     setFlashLines([]);
@@ -303,12 +328,37 @@ export default function Tetris() {
   };
 
   useEffect(() => {
-    if (gameOver) return;
+    const handleGameOver = async () => {
+      if (gameOver) {
+        if (timerRef.current) clearInterval(timerRef.current);
+        const currentStats = await loadLifetimeStats() ?? { highScore: 0, totalLinesCleared: 0, totalGamesPlayed: 0, totalTime: 0 };
+        const newStats = {
+          highScore: Math.max(currentStats.highScore, score),
+          totalLinesCleared: currentStats.totalLinesCleared + linesCleared,
+          totalGamesPlayed: currentStats.totalGamesPlayed + 1,
+          totalTime: currentStats.totalTime + timeElapsed,
+        };
+        await saveLifetimeStats(newStats);
+      }
+    };
+    handleGameOver();
+  }, [gameOver]);
+
+  useEffect(() => {
+    if (gameOver) {
+      if (timerRef.current) clearInterval(timerRef.current);
+      return;
+    }
+
+    if (!timerRef.current) {
+      timerRef.current = setInterval(() => {
+        setTimeElapsed((prev) => prev + 1);
+      }, 1000);
+    }
 
     const gameLoop = () => {
       tick();
-      // Calculate next interval duration based on softDropRef
-      const intervalDuration = softDropRef.current ? 50 : 500;
+      const intervalDuration = softDropRef.current ? 50 : dropSpeed;
       intervalRef.current = setTimeout(gameLoop, intervalDuration);
     };
 
@@ -316,13 +366,16 @@ export default function Tetris() {
         clearTimeout(intervalRef.current);
     }
     
-    // Start the loop
-    intervalRef.current = setTimeout(gameLoop, 500);
+    intervalRef.current = setTimeout(gameLoop, dropSpeed);
 
     return () => {
       if (intervalRef.current) clearTimeout(intervalRef.current);
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
     };
-  }, [tick, gameOver, softDropRef.current]);
+  }, [tick, gameOver, softDropRef.current, dropSpeed]);
 
   const hardDrop = () => {
     if (gameOver) return;
@@ -337,174 +390,29 @@ export default function Tetris() {
     }
 
     setCurrentPiece(nextPiece);
-    setNextPiece(randomPiece());
+    setNextPiece(getNextPiece());
     setPos({ x: 3, y: 0, rotation: 0 });
   };
 
-  return (
-    <View style={styles.container}>
-      <Text style={styles.score}>Score: {score}</Text>
+  return {
+    board,
+    currentPiece,
+    pos,
+    nextPiece,
+    holdPiece,
+    gameOver,
+    score,
+    linesCleared,
+    timeElapsed,
+    flashLines,
+    softDropRef,
+    move,
+    rotate,
+    hold,
+    restart,
+    hardDrop,
+    ghostY
+  };
+};
 
-      <View style={styles.sidePanels}>
-        <View style={styles.preview}>
-          <Text style={styles.previewText}>Hold</Text>
-          <View style={styles.previewBox}>
-            {holdPiece ? (
-              // Use original shape for display
-              (PIECES[holdPiece.name]).map((row, y) => (
-                <View key={y} style={{ flexDirection: "row" }}>
-                  {row.map((cell, x) => (
-                    <View
-                      key={x}
-                      style={[
-                        styles.cell,
-                        styles.smallCell,
-                        cell ? { backgroundColor: holdPiece.color } : undefined,
-                      ]}
-                    />
-                  ))}
-                </View>
-              ))
-            ) : (
-              <Text style={styles.previewText}>---</Text>
-            )}
-          </View>
-        </View>
-
-        <View style={styles.preview}>
-          <Text style={styles.previewText}>Next</Text>
-          <View style={styles.previewBox}>
-            {nextPiece.shape.map((row, y) => (
-              <View key={y} style={{ flexDirection: "row" }}>
-                {row.map((cell, x) => (
-                  <View
-                    key={x}
-                    style={[
-                      styles.cell,
-                      styles.smallCell,
-                      cell ? { backgroundColor: nextPiece.color } : undefined,
-                    ]}
-                  />
-                ))}
-              </View>
-            ))}
-          </View>
-        </View>
-      </View>
-
-      <View style={styles.board}>
-        {board.map((row, y) => (
-          <View key={y} style={styles.row}>
-            {row.map((cell, x) => {
-              let color = cell;
-              let borderColor = "#333";
-
-              // Ghost piece (rendered first to be underneath current piece)
-              const ghostDropY = ghostY();
-              currentPiece.shape.forEach((r, dy) =>
-                r.forEach((v, dx) => {
-                  if (v && x === pos.x + dx && y === ghostDropY + dy) {
-                    if (!color) {
-                      color = currentPiece.color + "55"; // Semi-transparent
-                    }
-                  }
-                })
-              );
-
-              // Current piece (rendered on top)
-              currentPiece.shape.forEach((r, dy) =>
-                r.forEach((v, dx) => {
-                  if (v && x === pos.x + dx && y === pos.y + dy) {
-                    color = currentPiece.color;
-                    borderColor = "#fff";
-                  }
-                })
-              );
-
-              // Flash lines
-              if (flashLines.includes(y)) {
-                color = "#fff";
-                borderColor = "#fff";
-              }
-
-              return <View key={x} style={[styles.cell, { borderColor }, color ? { backgroundColor: color } : undefined]} />;
-            })}
-          </View>
-        ))}
-      </View>
-
-      {gameOver ? (
-        <>
-          <Text style={styles.gameOver}>GAME OVER</Text>
-          <TouchableOpacity onPress={restart} style={[styles.btn, { marginTop: 16 }]}>
-            <Text style={styles.btnText}>Restart</Text>
-          </TouchableOpacity>
-        </>
-      ) : (
-        <View style={styles.controlsWrapper}>
-          <View style={styles.leftControls}>
-            <TouchableOpacity onPress={() => rotate(-1)} style={styles.btn}>
-              <Text style={styles.btnText}>CCW</Text>
-              <Text style={styles.btnSubText}>⟲</Text>
-            </TouchableOpacity>
-            <TouchableOpacity onPress={() => rotate(1)} style={styles.btn}>
-              <Text style={styles.btnText}>CW</Text>
-              <Text style={styles.btnSubText}>⟳</Text>
-            </TouchableOpacity>
-          </View>
-
-          <View style={styles.middleControls}>
-            <TouchableOpacity onPress={hold} style={styles.btn}>
-              <Text style={styles.btnText}>Hold</Text>
-            </TouchableOpacity>
-            <View style={styles.directionalControls}>
-              <TouchableOpacity onPress={() => move(-1)} style={styles.btn}>
-                <Text style={styles.btnText}>←</Text>
-              </TouchableOpacity>
-
-              <Pressable
-                // Hard Drop on simple press
-                onPress={() => hardDrop()}
-                // Soft Drop on long press or press in/out for continuous movement
-                onPressIn={() => (softDropRef.current = true)}
-                onPressOut={() => (softDropRef.current = false)}
-                style={styles.btn}
-              >
-                <Text style={styles.btnText}>↓</Text>
-              </Pressable>
-
-              <TouchableOpacity onPress={() => move(1)} style={styles.btn}>
-                <Text style={styles.btnText}>→</Text>
-              </TouchableOpacity>
-            </View>
-            <TouchableOpacity onPress={hardDrop} style={styles.btn}>
-              <Text style={styles.btnText}>Hard Drop</Text>
-            </TouchableOpacity>
-          </View>
-          
-        </View>
-      )}
-    </View>
-  );
-}
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#111", justifyContent: "center", alignItems: "center", paddingTop: 80 },
-  board: { backgroundColor: "#111", padding: 2, borderWidth: 4, borderColor: "#555" },
-  row: { flexDirection: "row" },
-  cell: { width: 24, height: 24, backgroundColor: "#222", borderWidth: 1, borderColor: "#333" },
-  smallCell: { width: 16, height: 16, margin: 1 },
-  controlsWrapper: { marginTop: 24, flexDirection: "row", justifyContent: "space-around", width: "90%", flexWrap: 'wrap', maxWidth: 600 },
-  leftControls: { flexDirection: "column", gap: 8, alignItems: "center", minWidth: 100 },
-  middleControls: { flexDirection: "column", gap: 12, alignItems: "center", marginTop: 0, flex: 1, marginHorizontal: 10, maxWidth: 300 },
-  directionalControls: { flexDirection: "row", gap: 12, alignItems: "center", justifyContent: 'center' },
-  btn: { padding: 10, borderWidth: 2, borderColor: "#555", backgroundColor: "#222", minWidth: 60, alignItems: "center", justifyContent: 'center', borderRadius: 4 },
-  btnText: { color: "#c0c0c0", fontSize: 16, textAlign: "center", fontWeight: 'bold' },
-  btnSubText: { color: "#c0c0c0", fontSize: 12, textAlign: "center" },
-  gameOver: { color: "#ff5555", fontSize: 24, fontWeight: 'bold', marginTop: 16 },
-  score: { color: "#fff", fontSize: 18, marginBottom: 16, fontWeight: 'bold', position: 'absolute', top: 40, right: 20 },
-  sidePanels: { position: "absolute", top: 40, flexDirection: "row", justifyContent: "space-between", width: "90%", paddingHorizontal: 20 },
-  preview: { alignItems: "center" },
-  previewBox: { borderWidth: 1, borderColor: '#444', padding: 4, backgroundColor: '#333' },
-  previewText: { color: "#fff", fontSize: 14, marginBottom: 4, fontWeight: 'bold' },
-});
+export default useGameLogic;
