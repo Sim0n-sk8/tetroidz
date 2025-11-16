@@ -1,9 +1,17 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, Button, StyleSheet, ActivityIndicator } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
+import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { loadLifetimeStats, LifetimeStats } from '../lib/storage';
 
-const HomeScreen = ({ navigation }) => {
+type RootStackParamList = {
+  Home: undefined;
+  Game: undefined;
+};
+
+type Props = NativeStackScreenProps<RootStackParamList, 'Home'>;
+
+const HomeScreen = ({ navigation }: Props) => {
   const [stats, setStats] = useState<LifetimeStats | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -33,7 +41,9 @@ const HomeScreen = ({ navigation }) => {
             <Text style={styles.statsText}>High Score: {stats.highScore}</Text>
             <Text style={styles.statsText}>Total Lines Cleared: {stats.totalLinesCleared}</Text>
             <Text style={styles.statsText}>Total Games Played: {stats.totalGamesPlayed}</Text>
-            <Text style={styles.statsText}>Total Time Played: {Math.floor(stats.totalTime / 60)}m {stats.totalTime % 60}s</Text>
+            <Text style={styles.statsText}>
+              Total Time Played: {Math.floor(stats.totalTime / 60)}m {stats.totalTime % 60}s
+            </Text>
           </>
         ) : (
           <Text style={styles.statsText}>No stats yet. Play a game!</Text>
